@@ -1,0 +1,181 @@
+require 'cocoapods'
+
+default_platform :ios
+
+platform :ios do
+  desc "Release new version to magic-ball-specs"
+  lane :release do |options|
+    version = options[:version]
+    message = options[:message] || "New version"
+
+    # check if magic-ball-specs is setup on local machine, setup if not
+    specs_repo_name = register_specs_repo
+
+    # make sure repo is in clean state (has no uncommited changes), otherwise - throw exception and stop
+    ensure_git_status_clean
+
+    # checkout master, pull master
+    checkout_master
+
+    # set version in .podspec file, commit, push master
+    update_version version
+
+    # create tag, push tag
+    create_tag message
+
+    # run pod command
+    upload_version_to_specs_repo specs_repo_name
+  end
+
+  # Cocoapods
+
+  def specs_repo_urls
+    ["git@github.com:cocoaheads-kyiv-14-workshop/specs.git", "https://github.com/cocoaheads-kyiv-14-workshop/specs.git"]
+  end
+
+  def register_specs_repo
+    UI.message "Checking if specs repo is already registered"
+
+    repos = Pod::Config.instance.sources_manager.all
+    specs_repo_name = repos.find { |r|
+      specs_repo_urls.include? r.url
+    }.name
+
+    if specs_repo_name.nil?
+      UI.message "Specs repo isn't registered, thus performing registration..."
+      specs_repo_name = "magic-ball-specs"
+      `pod repo add #{specs_repo_name} #{specs_repo_urls.first} --progress --verbose`
+    else
+      UI.message "Specs repo is already registered: #{specs_repo_name}"
+    end
+
+    specs_repo_name
+  end
+
+  def upload_version_to_specs_repo(repo)
+    podspec_path = podspec_pathname
+    podspec_name = podspec_path.to_s
+
+    pod_push(
+      path: podspec_name,
+      repo: repo,
+      allow_warnings: true,
+      sources: [specs_repo_urls.first, "https://github.com/CocoaPods/Specs.git"],
+      verbose: true
+    )
+
+    product = podspec_path.basename('.podspec')
+    version = version_get_podspec(path: podspec_name)
+    UI.message "Successfully deployed new #{product} version: #{version}"
+  end
+
+  # Versioning
+
+  def update_version(version)
+    bumped_version = bump_version version
+
+    ensure_git_tag_doesnt_exist bumped_version
+
+    UI.message "Commiting 'version bump' and pushing to remote"
+    begin
+      git_commit(
+        path: podspec_pathname.to_s,
+        message: "version bump"
+      )
+    rescue => ex
+      UI.message "Seems like nothing to commit. But it doesn't mean such version exists. Let's see, continue :)"
+    end
+
+    UI.message "Pushing 'master' branch to remote"
+    push_to_git_remote(
+      remote: "origin",
+      local_branch: "master",
+      remote_branch: "master",
+      force: false,
+      tags: false
+    )
+  end
+
+  def bump_version(version)
+    podspec_name = podspec_pathname.to_s
+
+    if version
+      version_bump_podspec(
+        path: podspec_name,
+        version_number: version
+      )
+    else
+      version_bump_podspec(
+        path: podspec_name,
+        bump_type: "patch"
+      )
+    end
+
+    version_get_podspec(path: podspec_name)
+  end
+
+  def create_tag(message)
+    bumped_version = version_get_podspec(path: podspec_pathname.to_s)
+    ensure_git_tag_doesnt_exist bumped_version
+
+    add_git_tag(
+      tag: bumped_version,
+      message: message
+    )
+
+    push_git_tags(
+      tag: bumped_version,
+      remote: "origin",
+      force: false
+    )
+  end
+
+  def ensure_git_tag_doesnt_exist(tag)
+    exists = git_tag_exists(
+      tag: tag,
+      remote: true,
+      remote_name: "origin"
+    )
+    if exists
+      handle_error("Corresponding tag already exists on remote. Please make sure that your project state is valid and try again.")
+    end
+  end
+
+  def podspec_pathname
+    # considering the fact that we're executing this lane from `fastlane` directory, we should go back to project root and start looking for podspec from there
+    containing_dir = ".."
+    containing_dir_pathname = Pathname.new(containing_dir)
+
+    file_pathname = Pathname.glob("#{containing_dir}/*.podspec").first
+    handle_error("Couldn't find .podspec file in #{containing_dir}. Make sure you're running this script from project directory root.") unless file_pathname
+    file_pathname.relative_path_from(containing_dir_pathname)
+  end
+
+  # Source Control
+
+  def checkout_master
+    UI.message "Checking-out 'master' branch from remote"
+    git_checkout_branch 'master'
+    git_pull_branch 'master'
+  end
+
+  def git_checkout_branch(branch)
+    `git checkout #{branch}` unless git_branch == branch
+  end
+
+  def git_pull_branch(branch)
+    `git pull --no-edit origin #{branch}`
+  end
+
+  # Misc
+
+  def handle_error(message)
+    reset_git_repo(
+      force: true,
+      skip_clean: false,
+      disregard_gitignore: true
+    )
+    UI.user_error!("#{message} Rolled back uncommited changes.")
+  end
+end
+
